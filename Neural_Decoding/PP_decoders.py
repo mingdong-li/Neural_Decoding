@@ -88,16 +88,16 @@ class KalmanFilterPP(object):
     def __init__(self,Distribution="Poisson"):
         # Poisson is one of the most used model for point process
         self.Distribution=Distribution
+        
 
-
-    def fit(self,X_kfpp_train,y_train):
+    def fit(self,X_train,y_train):
 
         """
-        Train Kalman Filter Decoder
+        Train Kalman Filter Point Process Decoder
 
         Parameters
         ----------
-        X_kfpp_train: numpy 2d array of shape [n_samples(i.e. timebins) , n_neurons]
+        X_train: numpy 2d array of shape [n_samples(i.e. timebins) , n_neurons]
             This is the neural data in Kalman filter format.
             See example file for an example of how to format the neural data correctly
 
@@ -109,23 +109,40 @@ class KalmanFilterPP(object):
         #xs are the state (here, the variable we're predicting, i.e. y_train)
         #zs are the observed variable (neural data here, i.e. X_kf_train)
         X=np.matrix(y_train.T)
-        Z=np.matrix(X_kf_train.T)
+        Z=np.matrix(X_train.T)
 
         #number of time bins
         nt=X.shape[1]
-
+        num_neuron = X_train.shape[1]
         #Calculate the transition matrix (from x_t to x_t+1) using least-squares, and compute its covariance
         #In our case, this is the transition from one kinematic state to the next
         X2 = X[:,1:]
         X1 = X[:,0:nt-1]
-        A=X2*X1.T*inv(X1*X1.T) #Transition matrix
-        W=(X2-A*X1)*(X2-A*X1).T/(nt-1)/self.C #Covariance of transition matrix. Note we divide by nt-1 since only nt-1 points were used in the computation (that's the length of X1 and X2). We also introduce the extra parameter C here.
+        F=X2*X1.T*inv(X1*X1.T) #Transition matrix
+        W=(X2-F*X1)*(X2-F*X1).T/(nt-1) #Covariance of transition matrix. Note we divide by nt-1 since only nt-1 points were used in the computation (that's the length of X1 and X2). We also introduce the extra parameter C here.
 
-        #Calculate the measurement matrix (from x_t to z_t) using least-squares, and compute its covariance
-        #In our case, this is the transformation from kinematics to spikes
-        H = Z*X.T*(inv(X*X.T)) #Measurement matrix
-        Q = ((Z - H*X)*((Z - H*X).T)) / nt #Covariance of measurement matrix
-        params=[A,W,H,Q]
+        # Calculate the measurement matrix (from x_t to z_t)
+        # use Generalized Linear Model
+        # Ref: 
+        # In our case, this is the transformation from kinematics to spikes
+
+        y_train_glm = np.concatenate([np.ones([y_train.shape[0],1]), y_train],axis=1)
+        H = np.zeros([num_neuron,y_train_glm.shape[1]])
+        if self.Distribution == "Poisson":
+            ### This is super-easy if we rely on built-in GLM fitting code
+            # endog: spike
+            for i in range(num_neuron):
+                glm_poisson_exp = sm.GLM(endog=X_train[:,i], exog=y_train_glm,
+                                        family=sm.families.Poisson())
+                pGLM_results = glm_poisson_exp.fit(max_iter=100, tol=1e-6, tol_criterion='params')
+                # params[0]: pGLM_const
+                # params[1:]: pGLM_stimu
+                H[i,:] = pGLM_results.params
+
+        else:
+            raise Exception('wrong distribution')
+
+        params=[F,W,H]
         self.model=params
 
     def predict(self,X_kf_test,y_test):
@@ -135,7 +152,7 @@ class KalmanFilterPP(object):
 
         Parameters
         ----------
-        X_kf_test: numpy 2d array of shape [n_samples(i.e. timebins) , n_neurons]
+        X_test: numpy 2d array of shape [n_samples(i.e. timebins) , n_neurons]
             This is the neural data in Kalman filter format.
 
         y_test: numpy 2d array of shape [n_samples(i.e. timebins),n_outputs]
@@ -150,7 +167,7 @@ class KalmanFilterPP(object):
         """
 
         #Extract parameters
-        A,W,H,Q=self.model
+        F,W,H=self.model
 
         #First we'll rename and reformat the variables to be in a more standard kalman filter nomenclature (specifically that from Wu et al):
         #xs are the state (here, the variable we're predicting, i.e. y_train)
