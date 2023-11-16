@@ -2,6 +2,7 @@
 
 import numpy as np
 from numpy.linalg import inv as inv #Used in kalman filter
+from tqdm import tqdm
 
 #Used for naive bayes decoder
 try:
@@ -76,18 +77,15 @@ class KalmanFilterPP(object):
 
     Parameters
     -----------
-    C - float, optional, default 1
-    This parameter scales the noise matrix associated with the transition in kinematic states.
-    It effectively allows changing the weight of the new neural evidence in the current update.
+    Distribution - string
 
-    Our implementation of the Kalman filter for neural decoding is based on that of Wu et al 2003 (https://papers.nips.cc/paper/2178-neural-decoding-of-cursor-motion-using-a-kalman-filter.pdf)
-    with the exception of the addition of the parameter C.
-    The original implementation has previously been coded in Matlab by Dan Morris (http://dmorris.net/projects/neural_decoding.html#code)
+
     """
 
-    def __init__(self,Distribution="Poisson"):
+    def __init__(self,Distribution="Poisson", Q_factor=100):
         # Poisson is one of the most used model for point process
         self.Distribution=Distribution
+        self.Q_factor = Q_factor
         
 
     def fit(self,X_train,y_train):
@@ -104,6 +102,7 @@ class KalmanFilterPP(object):
         y_train: numpy 2d array of shape [n_samples(i.e. timebins), n_outputs]
             This is the outputs that are being predicted
         """
+        print("start training")
 
         #First we'll rename and reformat the variables to be in a more standard kalman filter nomenclature (specifically that from Wu et al, 2003):
         #xs are the state (here, the variable we're predicting, i.e. y_train)
@@ -119,7 +118,7 @@ class KalmanFilterPP(object):
         X2 = X[:,1:]
         X1 = X[:,0:nt-1]
         F=X2*X1.T*inv(X1*X1.T) #Transition matrix
-        W=(X2-F*X1)*(X2-F*X1).T/(nt-1) #Covariance of transition matrix. Note we divide by nt-1 since only nt-1 points were used in the computation (that's the length of X1 and X2). We also introduce the extra parameter C here.
+        Q=(X2-F*X1)*(X2-F*X1).T/(nt-1) #Covariance of transition matrix. Note we divide by nt-1 since only nt-1 points were used in the computation (that's the length of X1 and X2). We also introduce the extra parameter C here.
 
         # Calculate the measurement matrix (from x_t to z_t)
         # use Generalized Linear Model
@@ -131,7 +130,7 @@ class KalmanFilterPP(object):
         if self.Distribution == "Poisson":
             ### This is super-easy if we rely on built-in GLM fitting code
             # endog: spike
-            for i in range(num_neuron):
+            for i in tqdm(range(num_neuron)):
                 glm_poisson_exp = sm.GLM(endog=X_train[:,i], exog=y_train_glm,
                                         family=sm.families.Poisson())
                 pGLM_results = glm_poisson_exp.fit(max_iter=100, tol=1e-6, tol_criterion='params')
@@ -142,13 +141,13 @@ class KalmanFilterPP(object):
         else:
             raise Exception('wrong distribution')
 
-        params=[F,W,H]
+        params=[F,Q,H]
         self.model=params
 
-    def predict(self,X_kf_test,y_test):
+    def predict(self,X_test,y_test):
 
         """
-        Predict outcomes using trained Kalman Filter Decoder
+        Predict outcomes using trained Kalman Filter Point Process Decoder
 
         Parameters
         ----------
@@ -167,32 +166,52 @@ class KalmanFilterPP(object):
         """
 
         #Extract parameters
-        F,W,H=self.model
+        F,Q,H=self.model
+        Q = self.Q_factor * Q
 
         #First we'll rename and reformat the variables to be in a more standard kalman filter nomenclature (specifically that from Wu et al):
         #xs are the state (here, the variable we're predicting, i.e. y_train)
         #zs are the observed variable (neural data here, i.e. X_kf_train)
         X=np.matrix(y_test.T)
-        Z=np.matrix(X_kf_test.T)
+        Z=np.matrix(X_test.T)
 
         #Initializations
         num_states=X.shape[0] #Dimensionality of the state
+        num_neuron = Z.shape[0]
         states=np.empty(X.shape) #Keep track of states over time (states is what will be returned as y_test_predicted)
+        lam = np.empty(Z.shape)
+
         P_m=np.matrix(np.zeros([num_states,num_states]))
         P=np.matrix(np.zeros([num_states,num_states]))
+        H_kin = np.matrix(H[:,1:])
+        H_const = np.matrix(H[:,0]).T
+
         state=X[:,0] #Initial state
         states[:,0]=np.copy(np.squeeze(state))
 
         #Get predicted state for every time bin
-        for t in range(X.shape[1]-1):
+        print("start predicting")
+        for t in tqdm(range(X.shape[1]-1)):            
             #Do first part of state update - based on transition matrix
-            P_m=A*P*A.T+W
-            state_m=A*state
+            P_m=F*P*F.T+Q
+            state_m=F*state
 
             #Do second part of state update - based on measurement matrix
-            K=P_m*H.T*inv(H*P_m*H.T+Q) #Calculate Kalman gain
-            P=(np.matrix(np.eye(num_states))-K*H)*P_m
-            state=state_m+K*(Z[:,t+1]-H*state_m)
+            lam_t = np.exp(H_const+H_kin*state_m)
+            lam[:,t] = np.squeeze(lam_t)
+            res = np.zeros([num_states,num_states])
+            for unit in range(num_neuron):
+                res += H_kin[unit,:].T*lam_t[unit]*H_kin[unit,:]
+
+            P_m = inv(inv(P_m)+res)
+            # Pkk[:,:,t] = P_m
+
+            res = np.zeros([num_states,1])
+            for unit in range(num_neuron):
+                res += H_kin[unit,:].T*(Z[unit,t]-lam_t[unit])
+            
+            state=np.array(state_m + P_m*res)
             states[:,t+1]=np.squeeze(state) #Record state at the timestep
+        
         y_test_predicted=states.T
         return y_test_predicted
