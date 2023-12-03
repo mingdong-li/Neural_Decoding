@@ -54,3 +54,28 @@ def get_rho(y_test,y_test_pred):
         rho_list.append(rho) #Append rho of this output to the list
     rho_array=np.array(rho_list)
     return rho_array #Return the array of rhos
+
+
+def get_mse(y_test,y_test_pred):
+
+    """
+    Function to get Mean Square Error (MSE)
+
+    Parameters
+    ----------
+    y_test - the true outputs (a matrix of size number of examples x number of outputs)
+    y_test_pred - the predicted outputs (a matrix of size number of examples x number of outputs)
+
+    Returns
+    -------
+    mse_array: An array of rho's for each output
+    """
+    num_sample = y_test.shape[0]
+    mse_list=[] #Initialize a list that will contain the rhos for all the outputs
+    for i in range(y_test.shape[1]): #Loop through outputs
+        #Compute mse for each output
+        mse_1d = np.sum((y_test_pred[:,i]-y_test[:,i])**2)/num_sample
+        mse_list.append(mse_1d) #Append rho of this output to the list
+    
+    mse_array=np.array(mse_list)
+    return mse_array #Return the array of mse
